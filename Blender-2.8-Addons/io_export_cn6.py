@@ -126,7 +126,7 @@ def getBoneWeights(boneName, weights):
 
 	return vgroup_data
 
-def do_export(filename, triangulate, use_selection):
+def do_export(context, filename, triangulate, use_selection):
 	print ("Start CN6 Export...")
 
 	file = open( filename, 'w')
@@ -135,6 +135,7 @@ def do_export(filename, triangulate, use_selection):
 	try:
 		modelObs = {}
 		modelMeshes = {}
+		depsgraph = context.evaluated_depsgraph_get()
 
 		objectSet = bpy.data.objects
 		if use_selection:
@@ -147,12 +148,15 @@ def do_export(filename, triangulate, use_selection):
 
 			if object.type == 'MESH':
 				print ("Getting parent for mesh: %s" % object.name)
+
 				for modifier in object.modifiers:
-					if modifier.object is not None:
+					if modifier.type == "ARMATURE" and modifier.object is not None and modifier.object.type == "ARMATURE":
 						parentArmOb = modifier.object
 						if not parentArmOb.name in modelMeshes:
 							modelMeshes[parentArmOb.name] = []
-						modelMeshes[parentArmOb.name].append(object)
+						modelMeshes[parentArmOb.name].append(object.evaluated_get(depsgraph))
+
+						break
 
 		for modelObName in modelObs.keys():
 			boneIds = {}
@@ -234,17 +238,25 @@ def do_export(filename, triangulate, use_selection):
 
 				for meshObject in modelMeshes[modelObName]:
 
-					mesh = meshObject.data
-					if triangulate:
-						mesh = mesh.copy()
-						bm = bmesh.new()
-						bm.from_mesh(mesh)
+					dup_meshObject = meshObject.copy
+					mesh = meshObject.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+					mesh = mesh.copy()
 
+					bm = bmesh.new()
+					bm.from_mesh(mesh)
+
+					bmesh_edges = []
+					for e in bm.edges:
+						if not e.smooth:
+							bmesh_edges.append(e)
+					bmesh.ops.split_edges(bm, edges=bmesh_edges)
+
+					if triangulate:
 						bmesh.ops.triangulate(bm, faces=bm.faces[:])
 
-						# Finish up, write the bmesh back to the mesh
-						bm.to_mesh(mesh)
-						bm.free()
+					# Finish up, write the bmesh back to the mesh
+					bm.to_mesh(mesh)
+					bm.free()
 
 					meshName = meshObject.name
 
@@ -255,86 +267,30 @@ def do_export(filename, triangulate, use_selection):
 						filedata += '\"%s\"\n' % material.name
 
 					# Read in preserved Normals, Binormals and Tangents
-					vertexBinormalsTangents = {}
-					originalVertexNormals = {}
-
-					useOriginalNormals = meshObject.vertex_groups.get("VERTEX_KEYS") is not None and mesh.get('originalTangentsBinormals') is not None
-
-					if useOriginalNormals:
-						for index, vertex in enumerate(mesh.vertices):
-
-								keyVertexGroup = meshObject.vertex_groups.get("VERTEX_KEYS")
-								if keyVertexGroup is not None:
-									weight = vertex.groups[keyVertexGroup.index].weight * 2000000
-									decodedVertexIndex = str(int(round(weight)))
-
-									print ("{}: decodedVertexIndex:{}".format(index, decodedVertexIndex))
-
-									if mesh['originalTangentsBinormals'].get(decodedVertexIndex) is not None:
-										tangentsBinormals = mesh['originalTangentsBinormals'][decodedVertexIndex]
-										originalVertexNormals[str(index)] = tangentsBinormals
+					FaceCornerBinormalsTangents = {}
 
 					# This will wipe out custom normals
+					mesh.update()
+					mesh.calc_normals_split()
 					mesh.calc_tangents(uvmap = mesh.uv_layers[0].name)
 
-					for poly in mesh.polygons:
-						for loop_index in poly.loop_indices:
+					for face in mesh.polygons:
+						faceId = face.index
+						FaceCornerBinormalsTangents[faceId] = {}
 
-							currentVertexIndex = mesh.loops[loop_index].vertex_index
-							loop = mesh.loops[loop_index]
+						for vert in [mesh.loops[i] for i in face.loop_indices]:
+							vertexId = vert.vertex_index
+							normal = vert.normal
 
-							currentVertBinormTang = (loop.normal[0], loop.normal[1], loop.normal[2], loop.tangent[0],loop.tangent[1],loop.tangent[2], loop.bitangent[0], loop.bitangent[1], loop.bitangent[2])
+							tangent = vert.tangent
+							normal = vert.normal
+							bitangent = vert.bitangent_sign * normal.cross(tangent)
 
-							if not currentVertexIndex in vertexBinormalsTangents:
-								vertexBinormalsTangents[currentVertexIndex] = []
-							vertexBinormalsTangents[currentVertexIndex].append(currentVertBinormTang)
-
-					if useOriginalNormals:
-						# Reset Custom Loop Normals
-						mesh.create_normals_split()
-
-						matchedLoops = 0
-						for loopIndex, loop in enumerate(mesh.loops):
-							if originalVertexNormals.get(str(loop.vertex_index)) is not None:
-								normalsEtc = originalVertexNormals[str(loop.vertex_index)]
-								loop.normal =  (normalsEtc[0], normalsEtc[1], normalsEtc[2])
-								matchedLoops += 1
-
-						mesh.validate(clean_customdata=False)
-
-						clnors = array.array('f', [0.0] * (len(mesh.loops) * 3))
-						mesh.loops.foreach_get("normal", clnors)
-
-						mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
-
-						mesh.normals_split_custom_set(tuple(zip(*(iter(clnors),) * 3)))
-						mesh.use_auto_smooth = True
-
-					# Average out Normals, Tangents and Bitangents for each Vertex
-					vertexNormsBinormsTangsSelected = {}
-
-					for vertId in vertexBinormalsTangents.keys():
-
-						sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7, sum8 = 0,0,0,0,0,0,0,0,0
-
-						for currentrow in vertexBinormalsTangents[vertId]:
-							sum0 = sum0 + currentrow[0]
-							sum1 = sum1 + currentrow[1]
-							sum2 = sum2 + currentrow[2]
-
-							sum3 = sum3 + currentrow[3]
-							sum4 = sum4 + currentrow[4]
-							sum5 = sum5 + currentrow[5]
-
-							sum6 = sum6 + currentrow[6]
-							sum7 = sum7 + currentrow[7]
-							sum8 = sum8 + currentrow[8]
-
-						numRows = len(vertexBinormalsTangents[vertId])
-
-						vertexNormsBinormsTangsSelected[vertId] = (sum0/numRows, sum1/numRows, sum2/numRows,
-																	sum3/numRows, sum4/numRows, sum5/numRows,
-																	sum6/numRows, sum7/numRows, sum8/numRows)
+							FaceCornerBinormalsTangents[faceId][vertexId] = (
+								normal[0], normal[1], normal[2],
+								tangent[0], tangent[1], tangent[2],
+								bitangent[0], bitangent[1], bitangent[2]
+							)
 
 					# Get Bone Weights
 					weights = meshNormalizedWeights(meshObject, mesh)
@@ -439,6 +395,8 @@ def do_export(filename, triangulate, use_selection):
 					for poly in mesh.polygons:
 						triangleVertUVIndexes.append([])
 
+						faceId = poly.index
+
 						for loop_index in poly.loop_indices:
 							vertexId = mesh.loops[loop_index].vertex_index
 
@@ -468,7 +426,7 @@ def do_export(filename, triangulate, use_selection):
 							else:
 								uniqueVertSet.add(vertSig)
 								uniqueVertUVIndexes[vertSig] = currentVertUVIndex
-								uniqueVertUVs.append((vertexId, uvt[0], uvt[1], uv2t[0], uv2t[1], uv3t[0], uv3t[1]))
+								uniqueVertUVs.append((faceId, vertexId, uvt[0], uvt[1], uv2t[0], uv2t[1], uv3t[0], uv3t[1]))
 								triangleVertUVIndex = currentVertUVIndex
 								currentVertUVIndex = currentVertUVIndex + 1
 
@@ -484,32 +442,21 @@ def do_export(filename, triangulate, use_selection):
 					# Write Vertices
 					for uniqueVertUV in uniqueVertUVs:
 
-						vertexIndex = uniqueVertUV[0]
+						faceIndex = uniqueVertUV[0]
+						vertexIndex = uniqueVertUV[1]
 						vertex = mesh.vertices[vertexIndex]
 						vertCoord = tuple(vertex.co)
 
-						uv = (uniqueVertUV[1], uniqueVertUV[2])
-						uv2 = (uniqueVertUV[3], uniqueVertUV[4])
-						uv3 = (uniqueVertUV[5], uniqueVertUV[6])
+						uv = (uniqueVertUV[2], uniqueVertUV[3])
+						uv2 = (uniqueVertUV[4], uniqueVertUV[5])
+						uv3 = (uniqueVertUV[6], uniqueVertUV[7])
 
 						vertexFound = False
 
-						if originalVertexNormals.get(str(vertexIndex)) is not None:
-							tangentsBinormals = originalVertexNormals[str(vertexIndex)]
-							vertNormal = (tangentsBinormals[0],tangentsBinormals[1],tangentsBinormals[2])
-							vertTangent = (tangentsBinormals[3],tangentsBinormals[4],tangentsBinormals[5])
-							vertBinormal = (tangentsBinormals[6],tangentsBinormals[7],tangentsBinormals[8])
-							vertexFound = True
-						else:
-							vertNBT = vertexNormsBinormsTangsSelected[vertexIndex]
-							vertNormal = (vertNBT[0], vertNBT[1], vertNBT[2])
-							vertTangent = (vertNBT[3], vertNBT[4], vertNBT[5])
-							vertBinormal = (vertNBT[6], vertNBT[7], vertNBT[8])
-
-						if (vertexFound):
-							preservedTangsBinormsCount += 1
-						else:
-							calculatedTangsBinormsCount += 1
+						vertNBT = FaceCornerBinormalsTangents[faceIndex][vertexIndex]
+						vertNormal = (vertNBT[0], vertNBT[1], vertNBT[2])
+						vertTangent = (vertNBT[3], vertNBT[4], vertNBT[5])
+						vertBinormal = (vertNBT[6], vertNBT[7], vertNBT[8])
 
 						filedata +='%.8f %.8f %.8f ' % (vertCoord[0] + position[0],  vertCoord[1] +  position[1], vertCoord[2] + position[2])
 						filedata +='%.8f %.8f %.8f ' % (vertNormal[0], vertNormal[1], vertNormal[2])
@@ -573,19 +520,20 @@ class export_cn6(bpy.types.Operator, ExportHelper):
 
 	triangulate: BoolProperty(
 			name="Triangulate",
-			description="Triangulate meshes before exporting",
+			description="Triangulate meshes before exporting, this may result in changes to normals",
 			default=True,
 			)
 	use_selection: BoolProperty(
 			name="Selected Objects",
 			description="Export only selected and visible objects",
-			default=False,
+			default=True,
 			)
 
 	def execute(self, context):
 		print ("Export Filename: {}".format(self.filepath))
-		do_export(self.filepath,
-			self.triangulate,
+		do_export(context,
+			self.filepath,
+			self.triangulate,\
 			self.use_selection,
 			)
 		return {'FINISHED'}
