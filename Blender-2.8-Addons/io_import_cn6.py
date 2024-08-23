@@ -17,6 +17,8 @@ from mathutils import Vector, Quaternion, Matrix
 from bpy_extras.io_utils import unpack_list, unpack_face_list, ImportHelper
 from math import radians
 
+BlenderVersion = bpy.app.version
+
 # Converts ms3d euler angles to a rotation matrix
 def RM(a):
 	sy = sin(a[2])
@@ -44,7 +46,7 @@ def getRotationMatrix(matrix_4x4):
 	return Matrix([[matrix_4x4[0][0],matrix_4x4[0][1],matrix_4x4[0][2]],
 				[matrix_4x4[1][0],matrix_4x4[1][1],matrix_4x4[1][2]],
 				[matrix_4x4[2][0],matrix_4x4[2][1],matrix_4x4[2][2]]])
-				
+
 def writeRotationMatrix(matrix_4x4, matrix_3x3):
 	for x in range(0, 3):
 		for y in range(0, 3):
@@ -78,7 +80,7 @@ def do_import(path, DELETE_TOP_BONE=True):
 		file = open(path, 'r')
 	except IOError:
 		return "Failed to open the file!"
-	
+
 	try:
 		if not path.endswith(".cn6"):
 			raise IOError
@@ -200,7 +202,7 @@ def do_import(path, DELETE_TOP_BONE=True):
 	boneWeights = [[],[],[],[],[],[],[],[]]
 	meshVertexGroups = {}
 	vCount = 0
-	
+
 	meshes = []
 	meshObjects = []
 
@@ -289,7 +291,7 @@ def do_import(path, DELETE_TOP_BONE=True):
 
 				meshVertexGroups[vCount] = meshName     # uses the long mesh name - may be > 21 chars
 				numVerts += 1
-		
+
 		meshes[i].vertices.add(len(coords))
 		meshes[i].vertices.foreach_set("co", unpack_list(coords))
 		meshOb = bpy.data.objects.new(meshName, meshes[i])
@@ -365,27 +367,35 @@ def do_import(path, DELETE_TOP_BONE=True):
 		mesh.uv_layers.new(name='UV3')
 
 		for l in mesh.loops:
-			l.normal[:] = normals[l.vertex_index]
+			if BlenderVersion < (4,1,0):
+				l.normal[:] = normals[l.vertex_index]
 			mesh.uv_layers[0].data[l.index].uv = uvs[l.vertex_index]
 			mesh.uv_layers[1].data[l.index].uv = uvs2[l.vertex_index]
 			mesh.uv_layers[2].data[l.index].uv = uvs3[l.vertex_index]
 
 		mesh.validate(clean_customdata=False)
 
-		clnors = array.array('f', [0.0] * (len(mesh.loops) * 3))
-		mesh.loops.foreach_get("normal", clnors)
+		if BlenderVersion < (4,1,0):
+			clnors = array.array('f', [0.0] * (len(mesh.loops) * 3))
+			mesh.loops.foreach_get("normal", clnors)
 
-		mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
+			mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
 
-		mesh.normals_split_custom_set(tuple(zip(*(iter(clnors),) * 3)))
-		mesh.use_auto_smooth = True
+			mesh.normals_split_custom_set(tuple(zip(*(iter(clnors),) * 3)))
+			mesh.use_auto_smooth = True
+		else:
+			mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
+			customNormals = []
+			for l in mesh.loops:
+				customNormals.append(normals[l.vertex_index])
 
-		#mesh.free_normals_split()
+			mesh.normals_split_custom_set(customNormals)
+
 		####NORMALS - End
 
 		meshObjects.append(meshOb)
 		scn.collection.objects.link(meshObjects[i])
-			
+
 	for mesh in meshes:
 		mesh.update()
 
@@ -397,7 +407,7 @@ def do_import(path, DELETE_TOP_BONE=True):
 			for bi in range(boneCount):
 				for j in range(8):
 					if bi==boneIds[j][vi]:
-						name = boneNames[bi] 
+						name = boneNames[bi]
 						if not meshOb.vertex_groups.get(name):
 							meshOb.vertex_groups.new(name=name)
 						grp = meshOb.vertex_groups.get(name)
@@ -405,7 +415,7 @@ def do_import(path, DELETE_TOP_BONE=True):
 						grp.add([mvi], normalizedWeight, 'ADD')
 						#print('Vertex: %d; Index: %d; Bone: %s; Weight: %f; ' % (mvi, j, name, normalizedWeight))
 			vi = vi + 1
-		
+
 		# Give mesh object an armature modifier, using vertex groups but not envelopes
 		mod = meshOb.modifiers.new('mod_' + mesh.name, 'ARMATURE')
 		mod.object = armOb
@@ -419,17 +429,17 @@ def do_import(path, DELETE_TOP_BONE=True):
 		bone = armature.bones.data.edit_bones[boneNames[0]]
 		while not bone.parent is None:
 			bone = bone.parent
-		
+
 		print ('Found World Bone: %s' % bone.name)
-		
+
 		name = bone.name
 		armOb.name = name
-		
+
 		# Delete top bone unless that would leave zero bones
 		if (len(armature.bones.data.edit_bones) > 1):
 			bpy.ops.object.select_pattern(pattern=name)
 			bpy.ops.armature.delete()
-		
+
 	bpy.ops.object.editmode_toggle()
 	bpy.ops.object.editmode_toggle()
 	bpy.ops.object.editmode_toggle()
