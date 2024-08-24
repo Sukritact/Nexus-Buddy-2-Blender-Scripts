@@ -1,6 +1,6 @@
 bl_info = {
 	"name": "Export CivNexus6 (.cn6)",
-	"author": "Deliverator, Sukritact",
+	"author": "Deliverator",
 	"version": (1, 0),
 	"blender": (2, 80, 0),
 	"location": "File > Export > CivNexus6 (.cn6)",
@@ -21,6 +21,8 @@ from bpy.props import (
 		StringProperty,
 		EnumProperty,
 		)
+
+BlenderVersion = bpy.app.version
 
 def getTranslationOrientation(ob):
 	if isinstance(ob, bpy.types.Bone):
@@ -271,7 +273,8 @@ def do_export(context, filename, triangulate, use_selection):
 
 					# This will wipe out custom normals
 					mesh.update()
-					mesh.calc_normals_split()
+					if BlenderVersion < (4,1,0):
+						mesh.calc_normals_split()
 					mesh.calc_tangents(uvmap = mesh.uv_layers[0].name)
 
 					for face in mesh.polygons:
